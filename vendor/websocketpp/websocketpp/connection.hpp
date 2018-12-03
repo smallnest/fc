@@ -1490,6 +1490,9 @@ private:
         m_elog.write(l, s.str());
     }
 
+    bool is_close_request();
+    bool is_close_response();
+
     // internal handler functions
     read_handler            m_handle_read_frame;
     write_frame_handler     m_write_frame_handler;

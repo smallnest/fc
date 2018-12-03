@@ -45,6 +45,8 @@
 #include <utility>
 #include <vector>
 
+#include <boost/algorithm/string.hpp>
+
 namespace websocketpp {
 
 namespace istate = session::internal_state;
@@ -1216,6 +1218,7 @@ lib::error_code connection<config>::process_handshake_request() {
 
         return lib::error_code();
     }
+    m_is_http = false;
 
     lib::error_code ec = m_processor->validate_handshake(m_request);
 
@@ -1326,7 +1329,9 @@ void connection<config>::write_http_response(lib::error_code const & ec) {
         }
     }
 
-    m_response.replace_header("Connection", "close");
+    if (m_response.get_status_code() >= http::status_code::bad_request || is_close_request()) {
+        m_response.replace_header("Connection", "close");
+    }
 
     // have the processor generate the raw bytes for the wire (if it exists)
     if (m_processor) {
@@ -1401,29 +1406,35 @@ void connection<config>::handle_write_http_response(lib::error_code const & ec) 
 
     if (m_response.get_status_code() != http::status_code::switching_protocols)
     {
-        /*if (m_processor || m_ec == error::http_parse_error || 
-            m_ec == error::invalid_version || m_ec == error::unsupported_version
-            || m_ec == error::upgrade_required)
-        {*/
-        if (!m_is_http) {
+        if (m_is_http) {
+            // if this was not a websocket connection, we have written
+            // the expected response and the connection can be closed.
+
+            this->log_http_result();
+
+            if (m_ec) {
+                m_alog.write(log::alevel::devel,
+                             "got to writing HTTP results with m_ec set: " + m_ec.message());
+            }
+            m_ec = make_error_code(error::http_connection_ended);
+        } else {
             std::stringstream s;
             s << "Handshake ended with HTTP error: "
               << m_response.get_status_code();
-            m_elog.write(log::elevel::rerror,s.str());
+            m_elog.write(log::elevel::rerror, s.str());
+        }
+
+        if (m_response.get_status_code() >= http::status_code::bad_request || is_close_response()) {
+            this->terminate(m_ec);
         } else {
-            // if this was not a websocket connection, we have written
-            // the expected response and the connection can be closed.
-            
-            this->log_http_result();
-            
-            if (m_ec) {
-                m_alog.write(log::alevel::devel,
-                    "got to writing HTTP results with m_ec set: "+m_ec.message());
-            }
-            m_ec = make_error_code(error::http_connection_ended);
-        }        
-        
-        this->terminate(m_ec);
+            // clear HTTP states to the initial ones and call HTTP handler
+            m_internal_state = istate::READ_HTTP_REQUEST;
+            m_request = request_type();
+            m_response = response_type();
+            m_uri.reset();
+            m_http_state = session::http_state::init;
+            this->read_handshake(1);
+        }
         return;
     }
 
@@ -1774,6 +1785,11 @@ void connection<config>::handle_terminate(terminate_status tstat,
         if (m_ec != error::http_connection_ended) {
             if (m_fail_handler) {
                 m_fail_handler(m_connection_hdl);
+            }
+        } else {
+            // for HTTP connection
+            if (m_close_handler) {
+                m_close_handler(m_connection_hdl);
             }
         }
     } else if (tstat == closed) {
@@ -2377,6 +2393,22 @@ void connection<config>::log_http_result() {
     }
 
     m_alog.write(log::alevel::http,s.str());
+}
+
+template<typename config>
+bool connection<config>::is_close_request() {
+    if (boost::iequals(m_request.get_version(), "HTTP/1.0")) {
+        return true;
+    }
+
+    std::string const & con_header = get_request_header("Connection");
+    return !(utility::ci_find_substr(con_header, "close", 4) == con_header.end());
+}
+
+template<typename config>
+bool connection<config>::is_close_response() {
+    std::string const & con_header = get_response_header("Connection");
+    return !(utility::ci_find_substr(con_header, "close", 4) == con_header.end());
 }
 
 } // namespace websocketpp
